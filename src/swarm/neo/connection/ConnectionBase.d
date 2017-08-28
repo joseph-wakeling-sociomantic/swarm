@@ -83,6 +83,22 @@ abstract class ConnectionBase: ISelectClient
 
     private class SendLoop : MessageFiber
     {
+        /// Exception thrown to inform the caller of registerForSending() that
+        /// the send loop has exited (due to an error).
+        private static Exception send_loop_exited_ex;
+
+        /***********************************************************************
+
+            Static constructor.
+
+        ***********************************************************************/
+
+        static this ( )
+        {
+            send_loop_exited_ex =
+                new Exception("Connection send loop exited due to an error.");
+        }
+
         /***********************************************************************
 
             Token used when suspending/resuming the fiber.
@@ -147,8 +163,25 @@ abstract class ConnectionBase: ISelectClient
             If the id is pushed to the queue and the sending fiber is idle, it
             is resumed to send the newly pushed message.
 
+            When the call to resume the sending fiber returns, we check the
+            reason for this. There are two cases:
+                1. The fiber *suspended* waiting for I/O or for another request
+                   id to be pushed to its queue. (This is the usual case.)
+                2. The fiber *exited* due to an error occurring in either the
+                   send loop or the Connection.connect() call.
+
+            In the second (error) case, all *suspended* requests (i.e. all
+            except the one that called registerForSending()) will have been
+            notified of the error via ConnectionBase.shutdownImpl(). The request
+            that called this method (registerForSending) must also be notified
+            that the send loop is dead.
+
             Params:
                 id = request id
+
+            Throws:
+                if the send loop is idle, is resumed, and then exits. (The send
+                loop only exits in case of an error.)
 
             Returns:
                 true if pushed or false if `id` was already in the queue.
@@ -162,6 +195,11 @@ abstract class ConnectionBase: ISelectClient
                 if ( this.idle )
                 {
                     this.resume(this.fiber_token.get(), this.outer);
+
+                    // If the send loop exited, notify the calling fiber. (See
+                    // note on error handling, above.)
+                    if ( !this.loop_started )
+                        throw send_loop_exited_ex;
                 }
                 return true;
             }
@@ -955,10 +993,10 @@ abstract class ConnectionBase: ISelectClient
         This method should not throw.
 
         Params:
+            e          = the exception reflecting the error
             request_id = the id of the request whose handler calls this method
                          and should not receive a shutdown notification or 0 if 
                          not calling from a request handler
-            e          = the exception reflecting the error
 
         In:
             This method must not be called in the sending fiber.
